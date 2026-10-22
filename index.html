@@ -1,0 +1,697 @@
+<!doctype html><html><head><meta charset=utf8><meta name=viewport content="width=device-width,initial-scale=1,viewport-fit=cover"><style>:root{color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}html{scroll-padding-top:env(safe-area-inset-top,0px)}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#fff;color:#000}img{max-width:100%}[hidden]:not([hidden=until-found i]){display:none!important}</style></head><body>
+<title>Fewer Locks, Fuller Huge Pages</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,500..900&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout concept: a lab notebook for a memory allocator. Wide column, each paper section opens with its § reference, one live instrument per section. */
+:root{
+  --bg:#EDF0F3; --surface:#F8F9FB; --sunk:#E3E8ED; --ink:#121B26; --muted:#556272; --line:#C9D1DA;
+  --buddy:#C4552D; --pcp:#7456A8; --ll:#0B8A78; --good:#1B9A5E; --warn:#B7791F;
+  --on-ll:#FFFFFF;
+  --f-display:'Archivo','Helvetica Neue',Arial,sans-serif;
+  --f-body:'IBM Plex Sans','Segoe UI',system-ui,sans-serif;
+  --f-mono:'IBM Plex Mono',ui-monospace,Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#0E141B; --surface:#151D27; --sunk:#0A0F15; --ink:#E6EBF1; --muted:#93A0B0; --line:#2A3644;
+  --buddy:#E27A52; --pcp:#A88BDB; --ll:#2DC4AE; --good:#3DDC97; --warn:#E3B04B; --on-ll:#062B26; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#0E141B; --surface:#151D27; --sunk:#0A0F15; --ink:#E6EBF1; --muted:#93A0B0; --line:#2A3644;
+  --buddy:#E27A52; --pcp:#A88BDB; --ll:#2DC4AE; --good:#3DDC97; --warn:#E3B04B; --on-ll:#062B26; color-scheme:dark}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:64px}
+body{background:var(--bg);color:var(--ink);font:400 16px/1.6 var(--f-body);padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));padding-block:0;margin:0}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:30;background:var(--bg)}
+.wrap{max-width:1120px;margin:0 auto}
+h1,h2,h3{font-family:var(--f-display);text-wrap:balance;margin:0;line-height:1.05}
+h2{font-size:clamp(28px,4.4vw,44px);font-weight:800;font-stretch:112%;letter-spacing:-.01em}
+h3{font-size:19px;font-weight:700;font-stretch:100%}
+p{margin:0}
+a{color:var(--ll)}
+code,.mono{font-family:var(--f-mono);font-size:.92em}
+.num{font-variant-numeric:tabular-nums}
+:focus-visible{outline:2px solid var(--ll);outline-offset:2px}
+
+/* nav */
+.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;background:var(--bg);border-bottom:1px solid var(--line);margin:0 calc(-1*max(16px,env(safe-area-inset-left,0px)));padding:0 max(16px,env(safe-area-inset-left,0px))}
+.top .wrap{display:flex;align-items:center;gap:20px;height:52px}
+.brand{font:800 15px var(--f-display);font-stretch:118%;letter-spacing:.02em;white-space:nowrap;color:var(--ink);text-decoration:none}
+.brand b{color:var(--ll)}
+nav{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;min-width:0}
+nav a{font:500 13px var(--f-body);color:var(--muted);text-decoration:none;padding:6px 10px;border-radius:6px;white-space:nowrap}
+nav a:hover{color:var(--ink);background:var(--sunk)}
+
+/* hero */
+.hero{padding-block:56px 40px;display:grid;gap:28px}
+.eyebrow{font:500 12px var(--f-mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+h1{font-size:clamp(40px,8.2vw,96px);font-weight:900;font-stretch:125%;letter-spacing:-.025em;line-height:.95}
+h1 em{font-style:normal;color:var(--ll)}
+.sub{font-size:clamp(17px,2.2vw,21px);max-width:62ch;color:var(--muted)}
+.authors{display:flex;flex-wrap:wrap;gap:6px 28px;font-size:15px}
+.authors span{color:var(--muted)}
+.strip{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:14px;display:grid;gap:8px}
+.strip .lbl{display:flex;justify-content:space-between;gap:12px;font:500 12px var(--f-mono);color:var(--muted)}
+.strip canvas{width:100%;display:block}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.stat{background:var(--surface);padding:18px 16px;display:grid;gap:4px;align-content:start;min-width:0}
+.stat b{font:800 clamp(30px,4.4vw,46px)/1 var(--f-display);font-stretch:110%;color:var(--ll);letter-spacing:-.02em}
+.stat.loss b{color:var(--buddy)}
+.stat span{font-size:13.5px;color:var(--muted)}
+
+/* sections */
+section{padding-block:64px;border-top:1px solid var(--line)}
+.head{display:grid;gap:12px;margin-bottom:28px;max-width:76ch}
+.kicker{font:500 12px var(--f-mono);letter-spacing:.1em;text-transform:uppercase;color:var(--ll)}
+.head p{color:var(--muted);font-size:17px}
+.panel{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:20px;display:grid;gap:18px;min-width:0}
+.note{font-size:13.5px;color:var(--muted);max-width:80ch}
+.note b{color:var(--ink);font-weight:600}
+.row{display:flex;flex-wrap:wrap;gap:12px 20px;align-items:center}
+.btn{font:500 14px var(--f-body);color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 14px;cursor:pointer}
+.btn:hover{border-color:var(--ink)}
+.btn.primary{background:var(--ll);color:var(--on-ll);border-color:var(--ll);font-weight:600}
+.btn[aria-pressed="true"],.btn.on{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+.btn:disabled{opacity:.45;cursor:default}
+.seg{display:inline-flex;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden;background:var(--bg)}
+.seg .btn{border:0;border-radius:0}
+.field{display:flex;align-items:center;gap:10px;font-size:14px}
+.field output{font:500 14px var(--f-mono);min-width:4.5ch}
+input[type=range]{accent-color:var(--ll);width:min(240px,50vw)}
+input[type=number]{width:72px;font:500 14px var(--f-mono);background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+input[type=checkbox]{accent-color:var(--ll);width:16px;height:16px}
+.tablewrap{overflow-x:auto;min-width:0}
+table{border-collapse:collapse;width:100%;font-size:14px}
+th{font:500 11.5px var(--f-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted);text-align:left;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td{padding:7px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+td.num,th.num{text-align:right}
+tr:last-child td{border-bottom:0}
+.sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:8px;vertical-align:-1px}
+.bar{width:160px;height:10px;background:var(--sunk);border-radius:3px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--ll);width:0}
+.formula{font:500 14px var(--f-mono);background:var(--sunk);border-radius:8px;padding:10px 12px;overflow-x:auto;white-space:nowrap}
+.flow{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:10px;align-items:stretch}
+.flow>div{border:1px solid var(--line);border-radius:10px;padding:14px;background:var(--surface);display:grid;gap:4px;align-content:start;min-width:0}
+.flow .arrow{border:0;background:none;padding:0;align-content:center;color:var(--muted);font-size:22px}
+.flow small{font:500 11px var(--f-mono);letter-spacing:.08em;text-transform:uppercase;color:var(--ll)}
+.flow p{font-size:14px;color:var(--muted)}
+.flow b{font-weight:600}
+.cols2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.cols3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+.cols2>*,.cols3>*{min-width:0}
+.card{border:1px solid var(--line);border-radius:10px;padding:14px;background:var(--bg);display:grid;gap:8px;align-content:start}
+.card h3{display:flex;align-items:center;gap:8px;font-size:16px}
+.card canvas{width:100%;display:block}
+.dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+.big{font:800 30px/1 var(--f-display);font-stretch:110%;letter-spacing:-.01em}
+.kv{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:13px;color:var(--muted)}
+.kv b{color:var(--ink);font-family:var(--f-mono);font-weight:500}
+.legend{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px;color:var(--muted)}
+.legend .x{color:var(--buddy);font-weight:600}
+.pill{display:inline-block;font:500 11.5px var(--f-mono);padding:2px 8px;border-radius:99px;background:var(--sunk);color:var(--muted)}
+.pill.win{background:var(--ll);color:var(--on-ll)}
+.pill.lose{background:var(--buddy);color:#fff}
+.code{font:400 13px/1.55 var(--f-mono);background:var(--sunk);border-radius:8px;padding:12px;overflow-x:auto;white-space:pre;margin:0}
+.code span{display:block;padding:0 6px;border-radius:3px}
+.code span.hit{background:color-mix(in srgb,var(--ll) 26%,transparent);color:var(--ink)}
+.log{font:400 12.5px/1.5 var(--f-mono);color:var(--muted);min-height:6.2em}
+.log div:first-child{color:var(--ink)}
+.counter{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+.counter>div{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px;display:grid;gap:2px}
+.counter small{font:500 11px var(--f-mono);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.counter b{font:600 22px var(--f-mono)}
+.kids{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.kid{border:1px solid var(--line);border-radius:8px;padding:8px;background:var(--bg);cursor:pointer;display:grid;gap:4px;font:500 12px var(--f-mono);color:var(--muted);text-align:left}
+.kid[aria-pressed="true"]{border-color:var(--ll);box-shadow:0 0 0 1px var(--ll)}
+.kid i{display:block;height:6px;border-radius:3px;background:var(--sunk);overflow:hidden}
+.kid i u{display:block;height:100%;background:var(--ll)}
+.kid b{color:var(--ink);font-weight:500}
+.tabs{display:flex;flex-wrap:wrap;gap:6px}
+.chart{display:grid;gap:12px}
+#lockCanvas{width:100%;display:block}
+.crow{display:grid;grid-template-columns:150px 1fr;gap:12px;align-items:center}
+.crow .nm{font-size:14px;display:flex;gap:8px;align-items:center}
+.track{position:relative;height:34px;background:var(--sunk);border-radius:6px;overflow:hidden}
+.fill{position:absolute;inset:0 auto 0 0;border-radius:6px;transition:width .5s cubic-bezier(.2,.7,.2,1);min-width:3px}
+.val{position:absolute;top:0;bottom:0;display:flex;align-items:center;padding:0 10px;font:500 13px var(--f-mono);color:var(--ink);white-space:nowrap}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{border:1px solid var(--line);border-radius:8px;padding:8px 12px;font-size:14px;background:var(--bg)}
+.chip b{font-family:var(--f-mono);font-weight:600;color:var(--ll)}
+.chip.bad b{color:var(--buddy)}
+td.best{background:color-mix(in srgb,var(--ll) 18%,transparent);font-weight:600}
+.scale{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.scale .card b.big{color:var(--ink)}
+.refs{columns:2;column-gap:32px;font-size:13.5px;color:var(--muted);padding-left:20px;margin:0}
+.refs li{break-inside:avoid;margin-bottom:8px}
+footer{padding-block:40px 64px;border-top:1px solid var(--line);font-size:13.5px;color:var(--muted);display:grid;gap:6px}
+.stacks{display:grid;gap:10px}
+.hint{font:500 12px var(--f-mono);color:var(--muted)}
+@media (max-width:860px){
+  .stats{grid-template-columns:repeat(2,1fr)}
+  .cols2,.cols3,.scale{grid-template-columns:1fr}
+  .flow{grid-template-columns:1fr}.flow .arrow{transform:rotate(90deg);justify-self:center}
+  .refs{columns:1}
+  .crow{grid-template-columns:1fr;gap:4px}
+  section{padding-block:48px}
+  .kids{grid-template-columns:repeat(2,1fr)}
+}
+@media (prefers-reduced-motion:reduce){html{scroll-behavior:auto}.fill{transition:none}}
+</style>
+<header class="top"><div class="wrap">
+  <a class="brand" href="#top">LL<b>FREE</b>-LITE</a>
+  <nav aria-label="Sections">
+    <a href="#layers">Two layers</a><a href="#contention">Lock race</a><a href="#memory">Memory map</a><a href="#internals">Inside LLFree</a><a href="#results">Benchmarks</a><a href="#hugepages">Huge pages</a><a href="#overhead">Metadata</a><a href="#conclusion">Takeaways</a>
+  </nav>
+</div></header>
+
+<main class="wrap" id="top">
+<div class="hero">
+  <div class="eyebrow">Operating Systems Self Learning Activity · Stage 3 · Interactive companion</div>
+  <h1>Fewer locks,<br><em>fuller</em> huge pages</h1>
+  <p class="sub">Applying LLFree-style lock-free page-frame allocation to multi-tenant cloud databases. Run the experiments from the paper yourself: race the allocators, watch memory fill frame by frame, and step through the lock-free algorithm.</p>
+  <div class="authors"><div><b>Gagan Gowda</b> &amp; <b>Anagha Katkar</b></div><span>Department of Computer Engineering, Shah &amp; Anchor Kutchhi Engineering College, Mumbai</span></div>
+
+  <div class="strip">
+    <div class="lbl"><span>6 processes share 96 frames, then 3 of them exit</span><span id="heroCap" class="num"></span></div>
+    <canvas id="heroCanvas" role="img" aria-label="Animated comparison: buddy allocator interleaves frames of six processes, LLFree-lite keeps each process in its own region. After three processes exit, buddy has no fully free region and LLFree-lite has three."></canvas>
+    <div class="legend"><span><span class="sw" style="background:var(--buddy)"></span>Top row: buddy hands frames to whoever asks, so processes interleave.</span><span><span class="sw" style="background:var(--ll)"></span>Bottom row: LLFree-lite keeps each core inside its own tree.</span></div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><b>93×</b><span>faster allocation than the global-lock buddy allocator at 12 threads</span></div>
+    <div class="stat"><b>9.3×</b><span>cloud-database throughput of Linux-style per-CPU lists</span></div>
+    <div class="stat"><b>100%</b><span>of possible 2 MiB huge pages still available after queries exit (buddy: 40–46%)</span></div>
+    <div class="stat loss"><b>−34%</b><span>the one loss: a core that frees a frame and instantly re-allocates it</span></div>
+  </div>
+  <p class="note"><b>Abstract.</b> Frame allocation has two layers. A quota policy (Equal or Proportional) decides how many frames each process may hold. A physical allocator decides which frames it gets and how fast. On a multi-core cloud database server the second layer becomes the bottleneck: the buddy allocator slows from 13 ns to 2.5 µs per allocation as cores are added, and it scatters concurrent processes across memory, which destroys the 2 MiB regions that huge pages need. We implement LLFree-lite, a simplified version of the lock-free LLFree allocator (USENIX ATC '23), and compare it with a textbook buddy allocator and a buddy allocator with Linux-style per-CPU lists on a 6-core / 12-thread AMD Ryzen 5 5600H.</p>
+</div>
+
+<!-- ============ LAYERS ============ -->
+<section id="layers">
+  <div class="head"><span class="kicker">Paper §1–2 · Background</span><h2>A fair quota does not make allocation fast</h2>
+  <p>Stages 1 and 2 built a simulator for the quota layer. Change the policy and process sizes below. Every frame of every quota still has to pass through the allocator layer, which is the subject of the rest of this page.</p></div>
+  <div class="panel">
+    <div class="flow">
+      <div><small>Layer 1 · policy</small><b>Quota</b><p>How many frames may each process hold? Equal: m/n. Proportional: a<sub>i</sub> = s<sub>i</sub>/S × m.</p></div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div><small>Layer 2 · mechanism</small><b>Frame allocator</b><p>On each page fault, find one free frame, mark it used, and take it back later. Buddy or LLFree.</p></div>
+      <div class="arrow" aria-hidden="true">→</div>
+      <div><small>Hardware</small><b>8 GiB of RAM</b><p>2,097,152 frames of 4 KiB. A 2 MiB huge page needs 512 contiguous free frames.</p></div>
+    </div>
+    <div class="row">
+      <div class="seg" role="group" aria-label="Quota policy"><button class="btn" id="polEq" aria-pressed="false">Equal</button><button class="btn" id="polPr" aria-pressed="true">Proportional</button></div>
+      <label class="field" for="memPct">Memory in use <input type="range" id="memPct" min="30" max="90" value="75" step="5"><output id="memPctOut" class="num" for="memPct">75%</output></label>
+    </div>
+    <div class="formula" id="qFormula"></div>
+    <div class="tablewrap"><table id="qTable"><thead><tr><th>Process (Table 2)</th><th>Size s<sub>i</sub></th><th>Exits</th><th class="num">Quota (frames)</th><th class="num">MiB</th><th>Share of RAM in use</th><th class="num">vs. proportional</th></tr></thead><tbody id="qBody"></tbody></table></div>
+    <p class="note">Sizes are relative units from the paper's Table 2 (three OLAP scan, join and aggregate queries plus six small OLTP lookups). Edit any size or exit flag; the memory-map simulator below uses these quotas, scaled to its 4,096-frame model.</p>
+  </div>
+</section>
+
+<!-- ============ CONTENTION ============ -->
+<section id="contention">
+  <div class="head"><span class="kicker">Paper §4.1 · The lock is the bottleneck</span><h2>Race the allocators</h2>
+  <p>Each dot is a CPU core asking for a frame. Add cores and watch what happens at the lock. The paper measured the global-lock buddy allocator going from 12.8 ns to 2,481 ns per allocation, a 194× slowdown, with 41% of lock acquisitions finding the lock already taken.</p></div>
+  <div class="panel">
+    <div class="row">
+      <label class="field" for="coreN">Cores <input type="range" id="coreN" min="1" max="12" value="8"><output id="coreOut" class="num" for="coreN">8</output></label>
+      <div class="seg" role="group" aria-label="Speed"><button class="btn" data-spd="0.5" aria-pressed="false">Slow</button><button class="btn" data-spd="1" aria-pressed="true">Normal</button><button class="btn" data-spd="3" aria-pressed="false">Fast</button></div>
+      <button class="btn" id="lockPlay">Pause</button>
+      <button class="btn" id="lockReset">Restart</button>
+    </div>
+    <canvas id="lockCanvas" role="img" aria-label="Three lanes showing cores requesting frames. In the buddy lane cores queue at one lock. In the per-CPU lane they occasionally queue. In the LLFree-lite lane no core waits."></canvas>
+    <div class="legend"><span><span class="sw" style="background:var(--muted);opacity:.5"></span>working</span><span><span class="sw" style="background:var(--warn)"></span>waiting for the lock</span><span><span class="sw" style="background:var(--ink)"></span>holding the lock / finishing an allocation</span></div>
+    <div class="cols3" id="lockStats"></div>
+    <p class="note"><b>How the model works.</b> Time advances in steps. A core needs one step of work per allocation. Buddy takes the lock for every allocation (hold: 1 step). Per-CPU lists take it for every 32nd allocation to refill a batch (hold: 3 steps). LLFree-lite never takes a lock because each core has a private reserved tree. The model shows the mechanism. Magnitudes differ from the hardware measurements, where cache-line bouncing makes the lock far more expensive than a single step.</p>
+  </div>
+</section>
+
+<!-- ============ MEMORY MAP ============ -->
+<section id="memory">
+  <div class="head"><span class="kicker">Paper §4.2 and Figure 2 · Interleaving destroys huge pages</span><h2>Fill memory, then let queries exit</h2>
+  <p>Twelve processes run on twelve CPUs and each faults in one frame per tick until it reaches its quota. The model has 64 regions of 64 frames. A region that is completely free could hold a huge page. Press <i>Terminate finished processes</i> to release the six that exit.</p></div>
+  <div class="panel">
+    <div class="row">
+      <button class="btn primary" id="memTerm">Terminate finished processes</button>
+      <button class="btn" id="memPlay">Pause</button>
+      <button class="btn" id="memReset">Restart</button>
+      <div class="seg" role="group" aria-label="Fill speed"><button class="btn" data-mspd="2" aria-pressed="false">Slow</button><button class="btn" data-mspd="6" aria-pressed="true">Normal</button><button class="btn" data-mspd="20" aria-pressed="false">Fast</button></div>
+    </div>
+    <div class="legend" id="memLegend"></div>
+    <div class="cols2">
+      <div class="card"><h3><span class="dot" style="background:var(--buddy)"></span>Buddy (global lock)</h3><canvas id="memBuddy" role="img" aria-label="Memory map for the buddy allocator"></canvas><div class="kv" id="memBuddyKv"></div></div>
+      <div class="card"><h3><span class="dot" style="background:var(--ll)"></span>LLFree-lite</h3><canvas id="memLL" role="img" aria-label="Memory map for LLFree-lite"></canvas><div class="kv" id="memLLKv"></div></div>
+    </div>
+    <p class="note" id="memVerdict"></p>
+    <p class="note"><b>Simplified model.</b> Buddy gives each request the lowest free frame. LLFree-lite gives each CPU its own 128-frame tree, prefers partly used trees when it needs a new one, and falls back to taking any free frame if memory runs out. The paper's Figure 2 reports 17 free regions for buddy and 38 for LLFree-lite with the same quotas. This simulation counts its own run, so the exact numbers can differ.</p>
+  </div>
+</section>
+
+<!-- ============ INTERNALS ============ -->
+<section id="internals">
+  <div class="head"><span class="kicker">Paper §5 · Design of LLFree-lite</span><h2>Step inside the allocator</h2>
+  <p>One CPU owns a reserved tree of four 2 MiB regions. Allocate and free frames and watch which counters move. The pseudocode lines that ran are highlighted. Count how few of the operations are shared atomics, and how none of them is a lock.</p></div>
+  <div class="panel">
+    <div class="row" id="ixButtons">
+      <button class="btn primary" data-op="alloc">Allocate 1 frame</button>
+      <button class="btn" data-op="alloc64">Allocate 64</button>
+      <button class="btn" data-op="free">Free (same CPU)</button>
+      <button class="btn" data-op="remote">Free (from CPU 1)</button>
+      <button class="btn" data-op="huge">Allocate 2 MiB</button>
+      <button class="btn" data-op="freehuge">Free 2 MiB</button>
+      <button class="btn" data-op="reset">Reset</button>
+    </div>
+    <div class="cols2">
+      <div class="stacks">
+        <div class="counter" id="ixCounters"></div>
+        <div class="kids" id="ixKids"></div>
+        <div class="card"><div class="kv"><span id="ixBitTitle"></span><span>1 row = one u64 word · 8 words = 64 bytes = one cache line</span></div><canvas id="ixBits" role="img" aria-label="Bitfield of the selected 2 MiB region, 512 bits"></canvas></div>
+      </div>
+      <div class="stacks">
+        <pre class="code" id="ixCode"></pre>
+        <div class="log" id="ixLog" aria-live="polite"></div>
+      </div>
+    </div>
+    <p class="note"><b>Why it scales.</b> A CPU reserves a tree by swapping the shared tree counter for RESERVED and keeping the free count in a private variable. Allocations then decrement that private integer instead of a shared one. A frame freed by another CPU goes back through an atomic increment of the shared tree counter, and the owner collects those later with one atomic exchange. Counters are decremented before bits are set and bits are cleared before counters are incremented, so a successful decrement guarantees the bit search will succeed.</p>
+  </div>
+</section>
+
+<!-- ============ RESULTS ============ -->
+<section id="results">
+  <div class="head"><span class="kicker">Paper §3 and §6 · Evaluation</span><h2>The measured results</h2>
+  <p>Five experiments on a 6-core / 12-thread AMD Ryzen 5 5600H, each point the median of five runs. Pick an experiment to see its definition and the 12-thread result. These are the paper's real measurements.</p></div>
+  <div class="panel">
+    <div class="tabs" id="bTabs" role="tablist" aria-label="Experiment"></div>
+    <div id="bDesc" class="note"></div>
+    <div class="row"><div class="seg" id="bScaleSeg" role="group" aria-label="Scale"><button class="btn" data-scale="log" aria-pressed="true">Log scale</button><button class="btn" data-scale="lin" aria-pressed="false">Linear scale</button></div><span class="hint" id="bUnit"></span></div>
+    <div class="chart" id="bChart"></div>
+    <div class="chips" id="bChips"></div>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>What adding cores costs (bulk allocation, 1 → 12 threads)</h3>
+    <div class="scale" id="bScale"></div>
+    <p class="note">LLFree-lite's time rises mostly beyond 8 threads, where two hardware threads share each of the 6 physical cores (SMT). The authors attribute it to the hardware, not the algorithm.</p>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>Table 3 · Summary at 12 threads</h3>
+    <div class="tablewrap"><table id="t3"></table></div>
+    <p class="note">B = buddy, B+pcp = buddy with per-CPU lists, LL = LLFree-lite. The highlighted cell is the best value in each row. Against the best traditional design in each row, LLFree-lite is 7.1× faster to allocate, 9.5× faster to free locally, 4.4× faster to free remotely, delivers 9.3× the database throughput and 2.2× the huge frames. It loses the same-core reuse case and supports fewer block sizes.</p>
+  </div>
+</section>
+
+<!-- ============ HUGE PAGES ============ -->
+<section id="hugepages">
+  <div class="head"><span class="kicker">Paper §6.5 and Figure 9 · Huge-page availability</span><h2>Same free memory, very different huge pages</h2>
+  <p>After half the processes exit, 5,135 MiB is free in all three runs. That is enough for at most 2,567 huge frames. Where the survivors' frames sit decides how many of them you can actually get.</p></div>
+  <div class="panel">
+    <div class="cols2">
+      <div class="card"><h3>Try it: one stray frame</h3>
+        <canvas id="hpDemo" role="img" aria-label="512 frames of one 2 MiB region. Click a frame to mark it used."></canvas>
+        <div class="row"><button class="btn" id="hpScatter">Place 6 stray frames</button><button class="btn" id="hpClear">Clear</button></div>
+        <div id="hpDemoMsg" class="note"></div>
+      </div>
+      <div class="card"><h3>2 MiB frames obtainable (Figure 9)</h3><div class="chart" id="hpBars"></div>
+        <p class="note">Buddy spreads the six surviving processes (3,057 MiB, which would fit into 1,529 regions) over <b>2,917 regions</b>, 71% of memory. LLFree-lite uses <b>1,530</b>. For a database, 54% fewer hash tables and buffers can be backed by huge pages with the traditional allocator. The rest fall back to 4 KiB pages and their TLB overhead.</p>
+      </div>
+    </div>
+    <div class="cols2">
+      <div class="card"><h3><span class="dot" style="background:var(--buddy)"></span>Buddy: 2,917 of 4,096 regions touched</h3><canvas id="hpBuddy" role="img" aria-label="Schematic of 4096 regions with survivors scattered across most of them"></canvas></div>
+      <div class="card"><h3><span class="dot" style="background:var(--ll)"></span>LLFree-lite: 1,530 of 4,096 regions touched</h3><canvas id="hpLL" role="img" aria-label="Schematic of 4096 regions with survivors in six compact blocks"></canvas></div>
+    </div>
+    <p class="note">Schematic. The counts are the paper's measurements. The positions are randomised for illustration. Filled squares hold at least one surviving frame. Outlined squares are completely free, so a 2 MiB huge frame fits there.</p>
+  </div>
+</section>
+
+<!-- ============ OVERHEAD ============ -->
+<section id="overhead">
+  <div class="head"><span class="kicker">Paper §6.6 · Memory overhead</span><h2>How much metadata does the allocator need?</h2>
+  <p>LLFree-lite keeps one bit per frame, a 4-byte counter per 2 MiB region and a 4-byte counter per 32-region tree. Our buddy implementation keeps two 32-bit list links and an order byte per frame. A real kernel hides those links inside its existing per-frame descriptor, so the exact factor is specific to our buddy code.</p></div>
+  <div class="panel">
+    <label class="field" for="ramGiB">RAM <input type="range" id="ramGiB" min="1" max="512" value="8"><output id="ramOut" class="num" for="ramGiB">8 GiB</output></label>
+    <div class="chart" id="ovChart"></div>
+    <div class="chips" id="ovChips"></div>
+  </div>
+</section>
+
+<!-- ============ CONCLUSION ============ -->
+<section id="conclusion">
+  <div class="head"><span class="kicker">Paper §6.8, §7 and §8</span><h2>What to take away</h2></div>
+  <div class="cols3">
+    <div class="card"><h3>Allocation is its own layer</h3><p class="note">Proportional allocation divides memory better than Equal allocation. On a multi-core host the allocator underneath the quota decides whether that memory arrives quickly and in huge-page-sized pieces.</p></div>
+    <div class="card"><h3>Where buddy still wins</h3><p class="note">When a core frees a frame and immediately allocates again, per-CPU lists hit a private cache and never touch the lock. They need 14.1 ns per pair against 18.9 ns. LLFree-lite still does real atomic updates on every operation.</p></div>
+    <div class="card"><h3>Next step</h3><p class="note">A small per-CPU cache in front of LLFree should keep the same-core fast path and the lock-free scalability. That combined design is the authors' proposed follow-up.</p></div>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>Threats to validity</h3>
+    <p class="note">The experiments run in user space on Windows 11, not inside a kernel. Thread pinning uses SetThreadAffinityMask, and the scheduler and SMT siblings add noise, reduced by taking the median of five runs. The buddy baselines follow the textbook and per-CPU designs. They are not the full Linux implementation, which also has migrate types, watermarks and compaction. The results are an algorithmic comparison, not a claim about a particular Linux version. A 6-core machine limits how far scaling can be observed, and LLFree's original evaluation goes to far higher core counts. LLFree-lite omits persistence, supports only orders 0 and 9, and leaves out the "steal" path used when memory is nearly exhausted.</p>
+    <h3>Reproduce it</h3>
+    <p class="note">The C benchmark (<code>src/</code>), the GUI (<code>gui/frame_sim.py</code>), the figure scripts and all raw results (<code>results/*.csv</code>) ship with the report. Run <code>sh build.sh</code> followed by <code>bin/bench all</code> to reproduce every number.</p>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>References</h3>
+    <ol class="refs">
+      <li>L. Wrenger, F. Rommel, A. Halbuer, C. Dietrich, D. Lohmann. LLFree: Scalable and Optionally-Persistent Page-Frame Allocation. USENIX ATC 2023, pp. 897–914.</li>
+      <li>K. C. Knowlton. A Fast Storage Allocator. Communications of the ACM 8(10):623–624, 1965.</li>
+      <li>D. E. Knuth. The Art of Computer Programming, Vol. 1: Fundamental Algorithms. Addison-Wesley, 3rd ed., 1997.</li>
+      <li>A. Silberschatz, P. B. Galvin, G. Gagne. Operating System Concepts. Wiley, 10th ed., 2018. Ch. 10.</li>
+      <li>M. Gorman. Understanding the Linux Virtual Memory Manager. Prentice Hall, 2004.</li>
+      <li>M. Herlihy. Wait-Free Synchronization. ACM TOPLAS 13(1):124–149, 1991.</li>
+      <li>J. Bonwick. The Slab Allocator. USENIX Summer Technical Conference, 1994.</li>
+      <li>J. Bonwick, J. Adams. Magazines and Vmem. USENIX ATC 2001.</li>
+      <li>E. D. Berger, K. S. McKinley, R. D. Blumofe, P. R. Wilson. Hoard. ASPLOS 2000.</li>
+      <li>J. Navarro, S. Iyer, P. Druschel, A. Cox. Practical, Transparent Operating System Support for Superpages. OSDI 2002.</li>
+      <li>Y. Kwon, H. Yu, S. Peter, C. J. Rossbach, E. Witchel. Coordinated and Efficient Huge Page Management with Ingens. OSDI 2016.</li>
+      <li>P. J. Denning. The Working Set Model for Program Behavior. CACM 11(5):323–333, 1968.</li>
+    </ol>
+  </div>
+</section>
+</main>
+<footer class="wrap"><div>Interactive companion to <b>“Fewer Locks, Fuller Huge Pages”</b> by Gagan Gowda and Anagha Katkar, Operating Systems Self Learning Activity, Stage 3.</div><div>Charts and tables use the paper's measured numbers. The animated simulations are small teaching models of the same mechanisms.</div></footer>
+<script>
+(function(){
+'use strict';
+const $=(s,r=document)=>r.querySelector(s), $$=(s,r=document)=>Array.from(r.querySelectorAll(s));
+const rootEl=document.documentElement, mqDark=matchMedia('(prefers-color-scheme: dark)');
+const reduce=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const isDark=()=>{const t=rootEl.getAttribute('data-theme');return t==='dark'?true:t==='light'?false:mqDark.matches};
+const cv=n=>getComputedStyle(rootEl).getPropertyValue(n).trim();
+const redraws=[]; const onTheme=f=>redraws.push(f);
+const redrawAll=()=>redraws.forEach(f=>f());
+mqDark.addEventListener('change',redrawAll);
+new MutationObserver(redrawAll).observe(rootEl,{attributes:true,attributeFilter:['data-theme']});
+let rz;addEventListener('resize',()=>{clearTimeout(rz);rz=setTimeout(redrawAll,120)});
+const procColor=i=>{const h=((i*5)%12)*30+10;return isDark()?`hsl(${h} 65% 62%)`:`hsl(${h} 62% 46%)`};
+function fit(canvas,h){const dpr=Math.min(devicePixelRatio||1,2),w=canvas.clientWidth||300;canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);canvas.style.height=h+'px';const c=canvas.getContext('2d');c.setTransform(dpr,0,0,dpr,0,0);return{c,w,h}}
+const fmt=n=>Math.round(n).toLocaleString('en-US');
+const fx=x=>x>=10?Math.round(x)+'×':x.toFixed(1)+'×';
+function rng(seed){return()=>{seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296}}
+function seg(sel,attr,cb){$$(sel).forEach(b=>b.addEventListener('click',()=>{$$(sel).forEach(x=>x.setAttribute('aria-pressed',x===b?'true':'false'));cb(b.dataset[attr])}))}
+
+/* ---------- shared data ---------- */
+const PROCS=[["OLAP-scan-1",400,1],["OLTP-1",40,0],["OLAP-join-1",300,0],["OLTP-2",30,1],["OLAP-agg-1",250,1],["OLTP-3",50,0],["OLAP-scan-2",350,0],["OLTP-4",20,1],["OLAP-join-2",280,1],["OLTP-5",35,0],["OLAP-agg-2",220,0],["OLTP-6",25,1]].map(p=>({name:p[0],size:p[1],exit:!!p[2]}));
+const st={procs:PROCS,policy:'prop',pct:75};
+const TOTAL_FRAMES=2097152;
+function quotaFrames(total){const S=st.procs.reduce((a,p)=>a+p.size,0)||1,n=st.procs.length;return st.procs.map(p=>st.policy==='prop'?Math.floor(p.size/S*total):Math.floor(total/n))}
+
+/* ---------- hero strip ---------- */
+const hero=$('#heroCanvas');
+function drawHero(now){
+  const {c,w,h}=fit(hero,86),N=96,gap=2,cw=(w-gap*(N-1))/N,rowH=30;
+  const T=9000,t=reduce?8000:(((now-heroT0)||0)+7000)%T;
+  const fill=Math.min(1,t/4000), exitK=t<5000?0:Math.min(1,(t-5000)/1500);
+  const cols=[0,2,4,6,8,10].map(procColor), free=cv('--sunk'), good=cv('--good');
+  let LLfree=0;
+  [0,1].forEach(r=>{
+    const y=r*(rowH+10)+4;
+    for(let i=0;i<N;i++){
+      const o=r===0?i%6:Math.floor(i/16), shown=i/N<fill, leaving=o%2===1;
+      const x=i*(cw+gap);
+      c.globalAlpha=1;c.fillStyle=free;c.fillRect(x,y,cw,rowH);
+      if(!shown)continue;
+      c.globalAlpha=leaving?1-exitK:1;c.fillStyle=cols[o];c.fillRect(x,y,cw,rowH);
+    }
+    c.globalAlpha=1;
+    if(r===1&&exitK>=1){c.strokeStyle=good;c.lineWidth=2;for(let g=0;g<6;g++){if(g%2===1){const x0=g*16*(cw+gap);c.strokeRect(x0+1,y-1,16*(cw+gap)-gap-2,rowH+2);LLfree++}}}
+  });
+  $('#heroCap').textContent=exitK>=1&&fill>=1?`free 2 MiB regions: buddy 0 · LLFree-lite ${LLfree}`:'';
+}
+let heroRaf,heroT0=0;function heroLoop(now){if(!heroT0)heroT0=now||performance.now();drawHero(now);if(!reduce)heroRaf=requestAnimationFrame(heroLoop)}
+onTheme(()=>drawHero(performance.now()));
+heroT0=performance.now();heroLoop(heroT0);
+
+/* ---------- quota layer ---------- */
+function buildQuota(){
+  $('#qBody').innerHTML=st.procs.map((p,i)=>`<tr><td><span class="sw" data-sw="${i}"></span>${p.name}</td><td><input type="number" min="1" max="999" value="${p.size}" data-i="${i}" data-k="size" aria-label="Size of ${p.name}"></td><td><input type="checkbox" ${p.exit?'checked':''} data-i="${i}" data-k="exit" aria-label="${p.name} exits"></td><td class="num" data-q="${i}"></td><td class="num" data-mib="${i}"></td><td><div class="bar"><i data-bar="${i}"></i></div></td><td class="num" data-rel="${i}"></td></tr>`).join('');
+}
+function renderQuota(){
+  const m=Math.floor(TOTAL_FRAMES*st.pct/100), S=st.procs.reduce((a,p)=>a+p.size,0)||1, n=st.procs.length;
+  const q=quotaFrames(m), prop=st.procs.map(p=>Math.floor(p.size/S*m));
+  const scale=Math.max(...prop,Math.floor(m/n),1);
+  $('#qFormula').textContent=st.policy==='prop'
+    ?`Proportional: a_i = s_i / S × m = s_i / ${S} × ${fmt(m)} frames  (S = ${S}, m = ${st.pct}% of 2,097,152)`
+    :`Equal: a_i = m / n = ${fmt(m)} / ${n} = ${fmt(Math.floor(m/n))} frames each  (m = ${st.pct}% of 2,097,152)`;
+  st.procs.forEach((p,i)=>{
+    $(`[data-sw="${i}"]`).style.background=procColor(i);
+    $(`[data-q="${i}"]`).textContent=fmt(q[i]);
+    $(`[data-mib="${i}"]`).textContent=fmt(q[i]*4/1024);
+    $(`[data-bar="${i}"]`).style.width=(q[i]/scale*100)+'%';
+    const r=prop[i]?q[i]/prop[i]:1, el=$(`[data-rel="${i}"]`);
+    el.textContent=r.toFixed(2)+'×'; el.style.color=Math.abs(r-1)<.02?'var(--muted)':r>1?'var(--buddy)':'var(--ll)';
+  });
+}
+onTheme(()=>{st.procs.forEach((p,i)=>{const e=$(`[data-sw="${i}"]`);if(e)e.style.background=procColor(i)})});
+let memDebounce;
+function quotaChanged(){renderQuota();clearTimeout(memDebounce);memDebounce=setTimeout(()=>mem.reset(),150)}
+buildQuota();renderQuota();
+$('#qBody').addEventListener('input',e=>{const t=e.target,i=+t.dataset.i,k=t.dataset.k;if(k==='size'){st.procs[i].size=Math.max(1,Math.min(999,+t.value||1))}else if(k==='exit'){st.procs[i].exit=t.checked}quotaChanged()});
+$('#polEq').onclick=()=>{st.policy='eq';$('#polEq').setAttribute('aria-pressed','true');$('#polPr').setAttribute('aria-pressed','false');quotaChanged()};
+$('#polPr').onclick=()=>{st.policy='prop';$('#polPr').setAttribute('aria-pressed','true');$('#polEq').setAttribute('aria-pressed','false');quotaChanged()};
+$('#memPct').addEventListener('input',e=>{st.pct=+e.target.value;$('#memPctOut').textContent=st.pct+'%';quotaChanged()});
+
+/* ---------- lock race ---------- */
+const LK={n:8,spd:1,run:true,acc:0,lanes:[],steps:0};
+const LANES=[{k:'buddy',name:'Buddy · one global lock',col:'--buddy'},{k:'pcp',name:'Buddy + per-CPU lists · lock every 32nd allocation',col:'--pcp'},{k:'ll',name:'LLFree-lite · no lock, private trees',col:'--ll'}];
+function newLane(k){return{k,cores:Array.from({length:12},()=>({st:'work',rem:1,cnt:0,hold:0,need:1})),queue:[],holder:null,ops:0,att:0,cont:0,hist:[0]}}
+function lockReset(){LK.lanes=LANES.map(l=>newLane(l.k));LK.steps=0;drawLock();updLockStats()}
+function stepLane(L,n){
+  if(L.holder){const h=L.holder;h.hold--;if(h.hold<=0){h.st='work';h.rem=1;L.ops++;L.holder=null}}
+  for(let i=0;i<n;i++){const c=L.cores[i];if(c.st!=='work')continue;c.rem--;if(c.rem>0)continue;
+    if(L.k==='ll'){L.ops++;c.rem=1;continue}
+    if(L.k==='pcp'){c.cnt++;if(c.cnt%32!==0){L.ops++;c.rem=1;continue}}
+    L.att++;if(L.holder||L.queue.length)L.cont++;
+    c.st='wait';c.need=L.k==='pcp'?3:1;L.queue.push(c)}
+  if(!L.holder&&L.queue.length){const c=L.queue.shift();c.st='hold';c.hold=c.need;L.holder=c}
+  L.hist.push(L.ops);if(L.hist.length>41)L.hist.shift();
+}
+function drawLock(){
+  const cn=$('#lockCanvas'),laneH=104,{c,w}=fit(cn,laneH*3+4),n=LK.n;
+  const muted=cv('--muted'),line=cv('--line'),ink=cv('--ink'),warn=cv('--warn'),sunk=cv('--sunk');
+  c.font='600 13px '+cv('--f-body');c.textBaseline='middle';
+  LANES.forEach((ln,li)=>{
+    const L=LK.lanes[li],y0=li*laneH+2,col=cv(ln.col);
+    c.fillStyle=sunk;c.fillRect(0,y0,w,laneH-8);
+    c.fillStyle=col;c.fillText(ln.name,10,y0+16);
+    c.fillStyle=muted;c.font='500 12px '+cv('--f-mono');c.textAlign='right';c.fillText('allocations done: '+fmt(L.ops),w-10,y0+16);c.textAlign='left';c.font='600 13px '+cv('--f-body');
+    const area=Math.max(120,w*.56-20),sp=Math.min(24,area/12),r=Math.min(8,sp*.34);
+    for(let i=0;i<12;i++){
+      const cx=18+i*sp,cy=y0+44;
+      if(i>=n){c.strokeStyle=line;c.lineWidth=1;c.beginPath();c.arc(cx,cy,r,0,6.283);c.stroke();continue}
+      const s=L.cores[i].st;
+      c.beginPath();c.arc(cx,cy,r,0,6.283);
+      if(s==='work'){c.globalAlpha=.45;c.fillStyle=ln.k==='ll'?col:muted;c.fill();c.globalAlpha=1}
+      else if(s==='wait'){c.fillStyle=warn;c.fill()}
+      else{c.fillStyle=ink;c.fill()}
+    }
+    c.fillStyle=muted;c.font='500 11px '+cv('--f-mono');c.fillText('cores',18,y0+66);
+    // lock
+    const lx=w*.62,ly=y0+28,lw=Math.min(w*.3,150),lh=36;
+    if(ln.k==='ll'){c.setLineDash([4,4]);c.strokeStyle=col;c.strokeRect(lx,ly,lw,lh);c.setLineDash([]);c.fillStyle=col;c.font='500 11px '+cv('--f-mono');c.fillText('no shared lock',lx+10,ly+lh/2);
+      c.fillStyle=muted;c.fillText('each core: own tree',lx,ly+lh+16)}
+    else{c.strokeStyle=L.holder?ink:line;c.lineWidth=2;c.strokeRect(lx,ly,lw,lh);c.lineWidth=1;c.fillStyle=muted;c.font='500 11px '+cv('--f-mono');c.fillText(L.holder?'LOCKED':'free',lx+10,ly+lh/2);
+      if(L.holder){c.fillStyle=ink;c.beginPath();c.arc(lx+lw-18,ly+lh/2,7,0,6.283);c.fill()}
+      c.fillStyle=muted;c.fillText('waiting: ',lx,ly+lh+16);
+      for(let q=0;q<L.queue.length;q++){c.fillStyle=warn;c.fillRect(lx+58+q*12,ly+lh+9,9,14)}
+      if(!L.queue.length){c.fillStyle=muted;c.fillText('nobody',lx+58,ly+lh+16)}}
+    c.font='600 13px '+cv('--f-body');
+  });
+}
+function updLockStats(){
+  const meas=[['12.8 ns → 2,481 ns','41% of acquisitions contended'],['17 ns → 189 ns','2.8% contended'],['10.5 ns → 26.7 ns','no lock to contend']];
+  $('#lockStats').innerHTML=LANES.map((ln,i)=>{const L=LK.lanes[i];const per=(L.hist[L.hist.length-1]-L.hist[0])/Math.max(1,L.hist.length-1);const cont=L.att?Math.round(L.cont/L.att*100):0;
+    return `<div class="card"><h3><span class="dot" style="background:var(${ln.col})"></span>${['Buddy','Buddy + pcp','LLFree-lite'][i]}</h3><div class="big num">${per.toFixed(1)}</div><div class="kv"><span>allocations per step with ${LK.n} core${LK.n>1?'s':''}</span></div><div class="kv"><span>model: <b>${ln.k==='ll'?'no lock':cont+'% contended'}</b></span></div><div class="kv"><span>paper, 1→12 threads: <b>${meas[i][0]}</b></span><span>${meas[i][1]}</span></div></div>`}).join('');
+}
+let lastT=0;
+function lockLoop(now){
+  const dt=Math.min(100,now-lastT);lastT=now;
+  if(LK.run){LK.acc+=dt/1000*6*LK.spd;let k=0;while(LK.acc>=1&&k<30){LK.acc-=1;k++;LK.lanes.forEach(L=>stepLane(L,LK.n));LK.steps++}
+    if(k){drawLock();if(LK.steps%2===0||k>1)updLockStats()}}
+  requestAnimationFrame(lockLoop);
+}
+$('#coreN').addEventListener('input',e=>{LK.n=+e.target.value;$('#coreOut').textContent=LK.n;lockReset()});
+seg('[data-spd]','spd',v=>{LK.spd=+v});
+$('#lockPlay').onclick=e=>{LK.run=!LK.run;e.target.textContent=LK.run?'Pause':'Resume'};
+$('#lockReset').onclick=lockReset;
+onTheme(drawLock);
+if(reduce)LK.run=false,$('#lockPlay').textContent='Resume';
+lockReset();
+if(reduce){for(let i=0;i<300;i++)LK.lanes.forEach(L=>stepLane(L,LK.n));drawLock();updLockStats()}
+requestAnimationFrame(t=>{lastT=t;lockLoop(t)});
+
+/* ---------- memory map ---------- */
+const NF=4096,RF=64,NR=64,TF=128,NT=32,NP=12;
+function newMem(kind){return{kind,owner:new Int16Array(NF).fill(-1),alloc:new Int32Array(NP),waits:0,lowest:0,treeFree:new Int16Array(NT).fill(TF),reserved:new Uint8Array(NT),res:new Int16Array(NP).fill(-1),terminated:false,used:0}}
+function pickTree(s){for(let t=0;t<NT;t++)if(!s.reserved[t]&&s.treeFree[t]>0&&s.treeFree[t]<TF)return t;for(let t=0;t<NT;t++)if(!s.reserved[t]&&s.treeFree[t]===TF)return t;return-1}
+function memAlloc(s,p){
+  if(s.kind==='buddy'){while(s.lowest<NF&&s.owner[s.lowest]!==-1)s.lowest++;if(s.lowest>=NF)return false;s.owner[s.lowest]=p;s.used++;return true}
+  let t=s.res[p];
+  if(t<0||s.treeFree[t]===0){if(t>=0)s.reserved[t]=0;t=pickTree(s);
+    if(t<0){for(let f=0;f<NF;f++)if(s.owner[f]===-1){s.owner[f]=p;s.treeFree[f>>7]--;s.used++;return true}return false}
+    s.res[p]=t;s.reserved[t]=1}
+  for(let f=t*TF;f<t*TF+TF;f++)if(s.owner[f]===-1){s.owner[f]=p;s.treeFree[t]--;s.used++;return true}
+  return false}
+function freeRegions(s){let n=0;for(let r=0;r<NR;r++){let ok=true;for(let f=r*RF;f<r*RF+RF;f++)if(s.owner[f]!==-1){ok=false;break}if(ok)n++}return n}
+const mem={b:null,l:null,quota:[],run:true,spd:6,tick:0,
+  reset(){const total=Math.floor(NF*st.pct/100),q=quotaFrames(total);const S=q.reduce((a,x)=>a+x,0);this.quota=q;this.b=newMem('buddy');this.l=newMem('ll');this.tick=0;this.total=total;this.draw();this.legend()},
+  done(){return this.b.alloc.every((a,i)=>a>=this.quota[i])&&this.l.alloc.every((a,i)=>a>=this.quota[i])},
+  step(){
+    [this.b,this.l].forEach(s=>{const act=[];for(let i=0;i<NP;i++){const p=(i+this.tick)%NP;if(s.alloc[p]<this.quota[p])act.push(p)}
+      if(s.kind==='buddy')s.waits+=act.length*(act.length-1)/2;
+      act.forEach(p=>{memAlloc(s,p);s.alloc[p]++})});
+    this.tick++},
+  terminate(){let g=0;while(!this.done()&&g++<20000)this.step();[this.b,this.l].forEach(s=>{for(let f=0;f<NF;f++){const o=s.owner[f];if(o>=0&&st.procs[o].exit){s.owner[f]=-1;s.treeFree[f>>7]++;s.used--}}s.lowest=0;s.terminated=true});this.draw()},
+  legend(){$('#memLegend').innerHTML=st.procs.map((p,i)=>`<span><span class="sw" style="background:${procColor(i)}"></span>${p.name} <span class="num">${fmt(this.quota[i])}</span>${p.exit?' <span class="x">exits</span>':''}</span>`).join('')},
+  drawOne(cn,s){
+    const W=cn.clientWidth||300,g=3,cell=Math.max(2,Math.floor((W-7*g)/64)),side=64*cell+7*g;
+    const {c}=fit(cn,side);const free=cv('--sunk'),good=cv('--good'),cols=st.procs.map((_,i)=>procColor(i));
+    for(let r=0;r<NR;r++){const x0=(r%8)*(8*cell+g),y0=Math.floor(r/8)*(8*cell+g);let all=true;
+      for(let k=0;k<RF;k++){const o=s.owner[r*RF+k];if(o>=0)all=false;c.fillStyle=o>=0?cols[o]:free;c.fillRect(x0+(k%8)*cell,y0+Math.floor(k/8)*cell,cell-(cell>3?1:0),cell-(cell>3?1:0))}
+      if(all&&s.terminated){c.strokeStyle=good;c.lineWidth=2;c.strokeRect(x0-1,y0-1,8*cell+1,8*cell+1)}}
+  },
+  draw(){
+    this.drawOne($('#memBuddy'),this.b);this.drawOne($('#memLL'),this.l);
+    const fb=freeRegions(this.b),fl=freeRegions(this.l),t=this.b.terminated;
+    $('#memBuddyKv').innerHTML=`<span>frames used <b class="num">${fmt(this.b.used)}</b></span><span>free regions <b class="num">${fb}</b></span><span>lock slots waited <b class="num">${fmt(this.b.waits)}</b></span>`;
+    $('#memLLKv').innerHTML=`<span>frames used <b class="num">${fmt(this.l.used)}</b></span><span>free regions <b class="num">${fl}</b></span><span>lock slots waited <b class="num">0</b></span>`;
+    $('#memVerdict').innerHTML=t?`After the exits, buddy has <b>${fb}</b> completely free regions and LLFree-lite has <b>${fl}</b>. The free memory is identical (${fmt(NF-this.b.used)} frames each). Only the placement differs, and buddy's requests also waited ${fmt(this.b.waits)} lock slots while LLFree-lite waited for none.`:(this.done()?'All processes reached their quota. Terminate the finished processes to see how many huge-page-sized regions each allocator leaves behind.':'Frames are being allocated. Buddy gives each request the lowest free frame, so neighbouring frames belong to different processes.');
+    $('#memTerm').disabled=t;
+  }};
+function memLoop(){if(mem.run&&!mem.done()&&!mem.b.terminated){for(let i=0;i<mem.spd;i++)if(!mem.done())mem.step();mem.draw()}requestAnimationFrame(memLoop)}
+$('#memTerm').onclick=()=>mem.terminate();
+$('#memReset').onclick=()=>mem.reset();
+$('#memPlay').onclick=e=>{mem.run=!mem.run;e.target.textContent=mem.run?'Pause':'Resume'};
+seg('[data-mspd]','mspd',v=>{mem.spd=+v});
+onTheme(()=>{mem.draw();mem.legend()});
+mem.reset();
+if(reduce){mem.run=false;$('#memPlay').textContent='Resume'}
+memLoop();
+
+/* ---------- LLFree internals ---------- */
+const CODE=['alloc_small(cpu):','  r = reservation[cpu]','  if r.local == 0:               # collect remote frees','    r.local += xchg(tree[r.tree], RESERVED)','  if r.local == 0 and !reserve_new_tree(cpu): return FAIL','  r.local -= 1                   # private, no atomic','  for child in r.tree, from r.hint:','    if !child.HUGE and CAS(child.free, v, v-1):','      repeat: x = bits[w]; b = ctz(~x)','              if CAS(bits[w], x, x | 1<<b): return frame(w,b)','','free_small(cpu, f):','  fetch_and(bits[f/64], ~(1 << f%64))','  fetch_add(child[f/512].free, 1)','  if reservation[cpu].tree == tree_of(f): reservation[cpu].local += 1','  else: fetch_add(tree[tree_of(f)], 1)'];
+const IX={};
+function ixReset(){IX.bits=new Uint8Array(2048);IX.free=[512,512,512,512];IX.huge=[0,0,0,0];IX.local=2048;IX.shared=0;IX.sel=0;IX.atomic=0;IX.priv=0;IX.hit=[];IX.log=['Tree reserved by CPU 0: its 2,048 free frames moved into a private counter.'];ixRender()}
+function ixLog(m){IX.log.unshift(m);IX.log=IX.log.slice(0,6)}
+function ixAlloc(){
+  const hit=[0,1,2,4,5,6,7,8,9];
+  if(IX.local===0){IX.atomic++;IX.local+=IX.shared;IX.shared=0;hit.push(3);if(IX.local>0)ixLog('Local count was 0, so CPU 0 collected remote frees with one atomic exchange.')}
+  if(IX.local===0){IX.hit=[0,1,2,3,4];ixLog('FAIL: the reserved tree is exhausted. A real CPU would now reserve another tree.');return false}
+  IX.local--;IX.priv++;
+  for(let ch=0;ch<4;ch++){if(IX.huge[ch]||IX.free[ch]===0)continue;IX.atomic+=2;IX.free[ch]--;let f=-1;for(let k=0;k<512;k++)if(!IX.bits[ch*512+k]){f=k;break}IX.bits[ch*512+f]=1;IX.hit=hit;ixLog(`Allocated frame ${ch*512+f} in region ${ch}: private local−1, then 2 atomics (child counter, one bit).`);return true}
+  IX.hit=hit;return false}
+function ixFree(remote){
+  const used=[];for(let ch=0;ch<4;ch++){if(IX.huge[ch])continue;for(let k=0;k<512;k++)if(IX.bits[ch*512+k])used.push(ch*512+k)}
+  if(!used.length){ixLog('Nothing to free.');return}
+  const f=used[Math.floor(Math.random()*used.length)],ch=f>>9;IX.bits[f]=0;IX.free[ch]++;IX.atomic+=2;
+  if(remote){IX.shared++;IX.atomic++;IX.hit=[11,12,13,15];ixLog(`CPU 1 freed frame ${f}: 3 atomics, including an increment of the shared tree counter that CPU 0 will collect later.`)}
+  else{IX.local++;IX.priv++;IX.hit=[11,12,13,14];ixLog(`CPU 0 freed frame ${f}: 2 atomics, then a private local+1.`)}}
+function ixHuge(){
+  const ch=IX.free.findIndex((v,i)=>v===512&&!IX.huge[i]);
+  if(ch<0||IX.local<512){ixLog('No completely free 2 MiB region, so the huge request fails and the 512 are returned. This is why scattered frames hurt.');IX.hit=[];return}
+  IX.local-=512;IX.priv++;IX.atomic++;IX.free[ch]=0;IX.huge[ch]=1;IX.hit=[];ixLog(`Region ${ch} claimed as a huge frame: one CAS flips its counter from exactly 512 to HUGE.`)}
+function ixFreeHuge(){const ch=IX.huge.findIndex(v=>v);if(ch<0){ixLog('No huge frame to free.');return}IX.huge[ch]=0;IX.free[ch]=512;IX.local+=512;ixLog(`Region ${ch} freed with one store: child counter reset to 512.`);IX.hit=[]}
+function ixRender(){
+  $('#ixCounters').innerHTML=`<div><small>Tree counter (shared)</small><b class="num">${IX.shared}</b><span class="hint">RESERVED by CPU 0</span></div><div><small>CPU 0 local count</small><b class="num">${IX.local}</b><span class="hint">private integer</span></div><div><small>Shared atomics</small><b class="num">${IX.atomic}</b><span class="hint">CAS / fetch_add</span></div><div><small>Private updates</small><b class="num">${IX.priv}</b><span class="hint">no atomic needed</span></div><div><small>Lock acquisitions</small><b class="num">0</b><span class="hint">never</span></div>`;
+  $('#ixKids').innerHTML=[0,1,2,3].map(i=>`<button class="kid" data-k="${i}" aria-pressed="${IX.sel===i}"><span>Region ${i}</span><b class="num">${IX.huge[i]?'HUGE':IX.free[i]+' free'}</b><i><u style="width:${IX.huge[i]?100:(512-IX.free[i])/512*100}%"></u></i></button>`).join('');
+  $('#ixCode').innerHTML=CODE.map((l,i)=>`<span class="${IX.hit.includes(i)?'hit':''}">${l.replace(/&/g,'&amp;').replace(/</g,'&lt;')||' '}</span>`).join('');
+  $('#ixLog').innerHTML=IX.log.map(l=>`<div>${l}</div>`).join('');
+  ixBits();
+}
+function ixBits(){
+  const cn=$('#ixBits'),w=cn.clientWidth||300,cell=Math.max(3,Math.floor((w)/64)),{c}=fit(cn,cell*8+2);
+  const used=cv('--ll'),free=cv('--sunk'),ch=IX.sel;
+  for(let r=0;r<8;r++)for(let k=0;k<64;k++){const on=IX.huge[ch]||IX.bits[ch*512+r*64+k];c.fillStyle=on?used:free;c.fillRect(k*cell,r*cell,cell-1,cell-1)}
+  $('#ixBitTitle').textContent=`Bitfield of region ${ch}${IX.huge[ch]?' (HUGE: all 512 frames in use)':''}`;
+}
+onTheme(ixBits);
+$('#ixKids').addEventListener('click',e=>{const b=e.target.closest('.kid');if(b){IX.sel=+b.dataset.k;ixRender()}});
+$('#ixButtons').addEventListener('click',e=>{const b=e.target.closest('[data-op]');if(!b)return;const op=b.dataset.op;
+  if(op==='reset'){ixReset();return}
+  if(op==='alloc')ixAlloc();else if(op==='alloc64'){let n=0;for(let i=0;i<64;i++)if(ixAlloc())n++;ixLog(`Allocated ${n} frames in a row: ${n} private decrements, ${n*2} shared atomics, no lock.`)}
+  else if(op==='free')ixFree(false);else if(op==='remote')ixFree(true);else if(op==='huge')ixHuge();else if(op==='freehuge')ixFreeHuge();
+  ixRender()});
+ixReset();
+
+/* ---------- benchmarks ---------- */
+const NAMES=[['Buddy (global lock)','--buddy'],['Buddy + per-CPU lists','--pcp'],['LLFree-lite','--ll']];
+const BENCH=[
+ {id:'alloc',tab:'bulk · alloc',unit:'ns per 4 KiB allocation, lower is better',lower:true,vals:[2481,189,26.7],log:true,desc:'bulk: each thread allocates 65,536 frames, then frees them. At 12 threads LLFree-lite needs 26.7 ns per allocation. It recorded no failed CAS operations, because each core works in its own reserved tree.'},
+ {id:'free',tab:'bulk · free',unit:'ns per free, lower is better',lower:true,vals:[2226,217,22.9],log:true,desc:'The free phase of bulk. LLFree-lite needs 22.9 ns per free against 2,226 ns for buddy and 217 ns for the per-CPU variant.'},
+ {id:'repeat',tab:'repeat',unit:'ns per alloc+free pair, lower is better',lower:true,vals:[4499,14.1,18.9],log:true,desc:'repeat: each thread allocates and immediately frees one frame, 524,288 times. This is the best case for per-CPU caches. The freed frame is reused from a private array and the lock is never taken. LLFree-lite still performs real atomic updates on the bitfield and child counter every time, so it is 34% slower here.'},
+ {id:'rand',tab:'rand · remote frees',unit:'ns per remote free, lower is better',lower:true,vals:[2515,403,91.5],log:true,desc:'rand: like bulk, but all frames are shuffled across threads before the free phase, so most frees are remote. This is common when a query\'s memory is released by a different worker. Per-CPU lists lose their advantage: frames land in the wrong core\'s cache, overflow it and drain under the lock.'},
+ {id:'clouddb',tab:'cloud database',unit:'million frame operations per second, higher is better',lower:false,vals:[2.26,45.0,418.7],log:false,desc:'clouddb: n database processes receive Proportional quotas over 50% of RAM. OLTP queries allocate 4–32 frames. OLAP queries allocate a 2 MiB huge frame plus a table chunk. Buddy collapses 20× as processes are added because 57% of its lock acquisitions are contended. OLAP requests overflow the 128-frame per-CPU cache and every huge-frame request bypasses it, so per-CPU lists stay flat. LLFree-lite scales almost linearly to 8.1× its single-process rate.'},
+ {id:'frag',tab:'frag · huge pages',unit:'% of the theoretically possible 2 MiB frames, higher is better',lower:false,vals:[46,40,100],log:false,desc:'frag: all 12 processes fill 75% of RAM concurrently up to their Proportional quota, then the six marked as exiting terminate. LLFree-lite can still allocate 2,566 of 2,567 possible huge frames. Buddy gets 1,179 and buddy with per-CPU lists 1,026.'},
+ {id:'cont',tab:'lock contention',unit:'% of lock acquisitions that find the lock taken (bulk, 12 threads)',lower:true,vals:[41,2.8,0],log:false,desc:'Share of lock acquisitions that find the lock already held in bulk at 12 threads. LLFree-lite takes no lock at all.'}
+];
+const B={cur:'alloc',scale:'log'};
+function drawBench(){
+  const d=BENCH.find(x=>x.id===B.cur);
+  $('#bDesc').textContent=d.desc;$('#bUnit').textContent=d.unit;
+  $('#bScaleSeg').style.display=d.log?'':'none';
+  const best=d.lower?Math.min(...d.vals):Math.max(...d.vals),useLog=d.log&&B.scale==='log';
+  const max=Math.max(...d.vals);
+  $('#bChart').innerHTML=d.vals.map((v,i)=>{
+    let wd=useLog?Math.max(2,Math.log10(Math.max(v,1))/Math.log10(10000)*100):Math.max(0.5,v/max*100);
+    if(d.id==='cont'&&v===0)wd=0.5;
+    const isBest=v===best;
+    const label=d.id==='cont'&&v===0?'no lock':(v>=100?fmt(v):String(v))+(d.id==='frag'?'%':d.id==='cont'?'%':'');
+    const inside=wd>22;
+    return `<div class="crow"><div class="nm"><span class="dot" style="background:var(${NAMES[i][1]})"></span>${NAMES[i][0]}</div><div class="track"><div class="fill" style="width:${wd}%;background:var(${NAMES[i][1]});opacity:${isBest?1:.8}"></div><div class="val" style="${inside?`left:0;width:${wd}%;justify-content:flex-end;color:#fff`:`left:${wd}%`}">${label}${isBest?' · best':''}</div></div></div>`}).join('');
+  const chips=[];
+  if(d.id==='cont'){chips.push(`<div class="chip"><b>No lock</b> in LLFree-lite, against 41% contended acquisitions in buddy</div>`)}
+  else if(d.id==='alloc'||d.id==='free'||d.id==='rand'){chips.push(`<div class="chip"><b>${fx(d.vals[0]/d.vals[2])}</b> faster than buddy</div>`,`<div class="chip"><b>${fx(d.vals[1]/d.vals[2])}</b> faster than buddy + per-CPU lists</div>`)}
+  else if(d.id==='repeat'){chips.push(`<div class="chip bad"><b>${Math.round((d.vals[2]/d.vals[1]-1)*100)}% slower</b> than buddy + per-CPU lists</div>`,`<div class="chip"><b>${fx(d.vals[0]/d.vals[2])}</b> faster than the global-lock buddy</div>`)}
+  else if(d.id==='clouddb'){chips.push(`<div class="chip"><b>${fx(d.vals[2]/d.vals[1])}</b> the throughput of buddy + per-CPU lists</div>`,`<div class="chip"><b>${fx(d.vals[2]/d.vals[0])}</b> the throughput of global-lock buddy</div>`)}
+  else if(d.id==='frag'){chips.push(`<div class="chip"><b>${fx(d.vals[2]/d.vals[0])}</b> the huge frames of buddy</div>`,`<div class="chip"><b>${fx(d.vals[2]/d.vals[1])}</b> the huge frames of buddy + per-CPU lists</div>`)}
+  $('#bChips').innerHTML=chips.join('');
+  $$('#bTabs .btn').forEach(b=>b.setAttribute('aria-selected',b.dataset.id===B.cur));
+  $$('#bTabs .btn').forEach(b=>b.classList.toggle('on',b.dataset.id===B.cur));
+}
+$('#bTabs').innerHTML=BENCH.map(d=>`<button class="btn" role="tab" data-id="${d.id}">${d.tab}</button>`).join('');
+$('#bTabs').addEventListener('click',e=>{const b=e.target.closest('[data-id]');if(b){B.cur=b.dataset.id;drawBench()}});
+seg('[data-scale]','scale',v=>{B.scale=v;drawBench()});
+drawBench();
+const SC=[['Buddy (global lock)','--buddy',12.8,2481],['Buddy + per-CPU lists','--pcp',17,189],['LLFree-lite','--ll',10.5,26.7]];
+$('#bScale').innerHTML=SC.map(s=>`<div class="card"><h3><span class="dot" style="background:var(${s[1]})"></span>${s[0]}</h3><div class="big num">${s[3]/s[2]>=10?Math.round(s[3]/s[2]):(s[3]/s[2]).toFixed(1)}× slower</div><div class="kv"><span><b>${s[2]} ns</b> at 1 thread</span><span><b>${fmt(s[3])} ns</b> at 12</span></div></div>`).join('');
+const T3=[['bulk alloc (ns)',[2481,189,26.7],1],['bulk free (ns)',[2226,217,22.9],1],['repeat pair (ns)',[4499,14.1,18.9],1],['rand remote free (ns)',[2515,403,91.5],1],['clouddb (Mops/s)',[2.26,45.0,418.7],0],['frag huge frames',['46%','40%','100%'],0,[46,40,100]],['lock contended (bulk)',['41%','2.8%','no lock'],1,[41,2.8,0]],['metadata, 8 GiB (MB)',[18.9,18.9,0.28],1],['block sizes',['4K–4M','4K–4M','4K, 2M'],null]];
+$('#t3').innerHTML='<thead><tr><th>Metric</th><th class="num">B</th><th class="num">B+pcp</th><th class="num">LL</th></tr></thead><tbody>'+T3.map(r=>{const cmp=r[3]||r[1];let best=-1;if(r[2]!==null){const v=cmp;const b=r[2]?Math.min(...v):Math.max(...v);best=v.indexOf(b)}
+  return `<tr><td>${r[0]}</td>${r[1].map((x,i)=>`<td class="num ${i===best?'best':''}">${typeof x==='number'&&x>=1000?fmt(x):x}</td>`).join('')}</tr>`}).join('')+'</tbody>';
+
+/* ---------- huge pages ---------- */
+$('#hpBars').innerHTML=[['Buddy (global lock)','--buddy',1179,46],['Buddy + per-CPU lists','--pcp',1026,40],['LLFree-lite','--ll',2566,100]].map(r=>`<div class="crow" style="grid-template-columns:1fr"><div class="nm"><span class="dot" style="background:var(${r[1]})"></span>${r[0]}</div><div class="track"><div class="fill" style="width:${r[3]}%;background:var(${r[1]})"></div><div class="val" style="${r[3]>30?'left:0;width:'+r[3]+'%;justify-content:flex-end;color:#fff':'left:'+r[3]+'%'}">${fmt(r[2])} of 2,567 · ${r[3]}%</div></div></div>`).join('');
+const HP={used:new Uint8Array(512)};
+function hpDraw(){
+  const cn=$('#hpDemo'),w=cn.clientWidth||300,cols=32,cell=Math.floor(w/cols),{c}=fit(cn,cell*16+1);
+  const on=cv('--buddy'),off=cv('--sunk'),good=cv('--good');let n=0;
+  for(let i=0;i<512;i++){if(HP.used[i])n++;c.fillStyle=HP.used[i]?on:off;c.fillRect((i%cols)*cell,Math.floor(i/cols)*cell,cell-1,cell-1)}
+  if(!n){c.strokeStyle=good;c.lineWidth=2;c.strokeRect(1,1,cols*cell-2,16*cell-2)}
+  $('#hpDemoMsg').innerHTML=n===0?'<b>All 512 frames are free.</b> This 2 MiB region can be backed by one huge page. Click frames to use them.':`<b>${n} stray frame${n>1?'s':''} in use.</b> The region is not contiguous any more, so the database falls back to 512 separate 4 KiB pages and their TLB entries.`;
+}
+$('#hpDemo').addEventListener('click',e=>{const cn=e.currentTarget,r=cn.getBoundingClientRect(),cell=Math.floor(cn.clientWidth/32),x=Math.floor((e.clientX-r.left)/cell),y=Math.floor((e.clientY-r.top)/cell);if(x<32&&y<16){HP.used[y*32+x]^=1;hpDraw()}});
+$('#hpScatter').onclick=()=>{const R=rng(Date.now()&0xffff);for(let i=0;i<6;i++)HP.used[Math.floor(R()*512)]=1;hpDraw()};
+$('#hpClear').onclick=()=>{HP.used.fill(0);hpDraw()};
+function hpMap(id,occ,colVar){
+  const cn=$(id),w=cn.clientWidth||300,cell=Math.max(2,Math.floor(w/64)),{c}=fit(cn,cell*64);
+  const col=cv(colVar),off=cv('--sunk'),good=cv('--good');
+  for(let i=0;i<4096;i++){const x=(i%64)*cell,y=Math.floor(i/64)*cell;if(occ[i]){c.fillStyle=col;c.fillRect(x,y,cell-1,cell-1)}else{c.fillStyle=off;c.fillRect(x,y,cell-1,cell-1);if(cell>=5){c.strokeStyle=good;c.lineWidth=1;c.strokeRect(x+.5,y+.5,cell-2,cell-2)}}}
+}
+const occB=new Uint8Array(4096),occL=new Uint8Array(4096);
+(function(){const R=rng(2023);const idx=Array.from({length:4096},(_,i)=>i);for(let i=4095;i>0;i--){const j=Math.floor(R()*(i+1));[idx[i],idx[j]]=[idx[j],idx[i]]}for(let i=0;i<2917;i++)occB[idx[i]]=1;
+  const sizes=[40,300,50,350,35,220],S=995;let blocks=sizes.map(s=>Math.round(s/S*1530));blocks[3]+=1530-blocks.reduce((a,b)=>a+b,0);
+  const gaps=[0,0,0,0,0,0,0],R2=rng(77);let rem=2566;for(let i=0;i<7;i++){const g=i<6?Math.floor(rem*(.1+R2()*.2)):rem;gaps[i]=g;rem-=g}
+  let pos=0;for(let b=0;b<6;b++){pos+=gaps[b];for(let k=0;k<blocks[b];k++)occL[pos+k]=1;pos+=blocks[b]}})();
+function hpAll(){hpDraw();hpMap('#hpBuddy',occB,'--buddy');hpMap('#hpLL',occL,'--ll')}
+onTheme(hpAll);hpAll();
+
+/* ---------- overhead ---------- */
+function ovDraw(){
+  const g=+$('#ramGiB').value,frames=g*262144,regions=frames/512,trees=regions/32;
+  const ll=frames/8+4*regions+4*trees,bd=frames*9;
+  const f=b=>b>=1e9?(b/1e9).toFixed(2)+' GB':b>=1e6?(b/1e6).toFixed(1)+' MB':(b/1e3).toFixed(0)+' KB';
+  $('#ramOut').textContent=g+' GiB';
+  $('#ovChart').innerHTML=[['Buddy (our implementation)','--buddy',bd,100],['LLFree-lite','--ll',ll,Math.max(.6,ll/bd*100)]].map(r=>`<div class="crow"><div class="nm"><span class="dot" style="background:var(${r[1]})"></span>${r[0]}</div><div class="track"><div class="fill" style="width:${r[3]}%;background:var(${r[1]})"></div><div class="val" style="${r[3]>30?'left:0;width:'+r[3]+'%;justify-content:flex-end;color:#fff':'left:'+r[3]+'%'}">${f(r[2])}</div></div></div>`).join('');
+  $('#ovChips').innerHTML=`<div class="chip"><b>${(ll*8/frames).toFixed(2)}</b> bits per frame (LLFree-lite)</div><div class="chip"><b>72</b> bits per frame (our buddy)</div><div class="chip"><b>${fx(bd/ll)}</b> less metadata</div><div class="chip"><b>${fmt(frames)}</b> frames · ${fmt(regions)} regions · ${fmt(trees)} trees</div>`;
+}
+$('#ramGiB').addEventListener('input',ovDraw);ovDraw();
+})();
+</script>
+
+</body></html>
